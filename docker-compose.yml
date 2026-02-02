@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  neo4j:
+    image: neo4j:5.18
+    container_name: research_neo4j
+    ports:
+      - "7474:7474" # Browser
+      - "7687:7687" # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_dbms_security_auth__enabled: "true"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: research_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  grobid:
+    image: lfoppiano/grobid:0.8.0
+    container_name: research_grobid
+    ports:
+      - "8070:8070"
+    restart: unless-stopped
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:
