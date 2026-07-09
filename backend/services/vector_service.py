@@ -52,9 +52,13 @@ class VectorService:
         results = []
         for i, idx in enumerate(I[0]):
             if idx != -1 and idx < len(candidates):
+                l2_dist = float(D[0][i])
+                # Fix #20: Convert L2 distance to a similarity score.
+                # 1 / (1 + L2) gives a value in (0, 1] where 1.0 = identical.
+                similarity = 1.0 / (1.0 + l2_dist)
                 results.append({
                     "concept": candidates[idx],
-                    "score": float(D[0][i]) # L2 distance (lower is better, or convert to similarity)
+                    "score": similarity
                 })
         return results
 
