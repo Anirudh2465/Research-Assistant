@@ -54,9 +54,9 @@ def list_tasks(
     if status:
         query = query.filter(Task.status == status)
         
-    # Default sort by urgency (deadline) then severity * importance
-    # For now simple due_date sort
-    return query.order_by(Task.due_datetime.asc()).all()
+    from sqlalchemy import nulls_last
+    # Fix #15: nulls_last ensures tasks without deadlines appear after those with them
+    return query.order_by(nulls_last(Task.due_datetime.asc())).all()
 
 @router.patch("/{id}")
 def update_task(id: int, updates: dict = Body(...), db: Session = Depends(get_db)):
