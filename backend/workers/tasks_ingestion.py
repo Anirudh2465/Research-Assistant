@@ -38,7 +38,17 @@ def extract_concepts_task(data):
         result = llm_extractor.extract_raw_concepts(text)
         all_raw_concepts.extend(result.get("concepts", []))
     
-    return {"raw_concepts": list(set(all_raw_concepts)), "job_id": job_id}
+    # Fix #6: set() fails on dicts (unhashable). Deduplicate by name if concepts are dicts,
+    # or just use list(set()) if they are plain strings.
+    seen_names = set()
+    unique_concepts = []
+    for c in all_raw_concepts:
+        key = c["name"] if isinstance(c, dict) else c
+        if key not in seen_names:
+            seen_names.add(key)
+            unique_concepts.append(c)
+    
+    return {"raw_concepts": unique_concepts, "job_id": job_id}
 
 @celery_app.task(name="ingestion.abstract_concepts")
 def abstract_concepts_task(data):
