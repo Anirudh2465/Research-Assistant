@@ -9,6 +9,7 @@ from backend.db.sqlite import get_db
 from backend.db.models import CeleryJob, Paper
 from backend.core.paths import PDF_DIR
 from backend.workers.tasks_ingestion import parse_pdf_task, extract_text_task, extract_concepts_task, abstract_concepts_task
+from backend.schemas.ingestion import ApprovalRequest  # Fix #19: use typed schema
 from celery import chain
 
 router = APIRouter(prefix="/api/papers", tags=["papers"])
@@ -74,7 +75,7 @@ def get_job_status(job_id: int, db: Session = Depends(get_db)):
     if job.payload:
         try:
              payload = json.loads(job.payload)
-        except:
+        except Exception:
              payload = job.payload
 
     return {
@@ -86,7 +87,11 @@ def get_job_status(job_id: int, db: Session = Depends(get_db)):
     }
 
 @router.post("/jobs/{job_id}/approve")
-def approve_job(job_id: int, approved_data: dict, db: Session = Depends(get_db)):
+def approve_job(
+    job_id: int,
+    approved_data: ApprovalRequest,  # Fix #19: was untyped dict
+    db: Session = Depends(get_db)
+):
     job = db.query(CeleryJob).filter(CeleryJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -94,34 +99,22 @@ def approve_job(job_id: int, approved_data: dict, db: Session = Depends(get_db))
     if job.status != "waiting_for_review":
         raise HTTPException(status_code=400, detail="Job is not waiting for review")
 
-    # Update Job with Approved Data
-    job.status = "approved"
-    job.payload = json.dumps(approved_data) # Store the approved concepts
-    db.commit()
-
-    # Trigger Phase 2 (Graph Write)
-    from backend.workers.tasks_graph import write_concepts_task
-    
-    # Extract approved concepts from payload - assuming payload is dict with "approved_concepts"
-    # or just the list itself depending on UI. Schema in backend/schemas/ingestion.py says ApprovalRequest has "approved_concepts"
-    # For now assume approved_data IS the ApprovalRequest dict
-    
-    concepts = approved_data.get("approved_concepts", [])
-    if not concepts:
-         # Fallback if raw list passed
-         if isinstance(approved_data, list):
-             concepts = approved_data
-         elif "high_level_concepts" in approved_data:
-             concepts = approved_data["high_level_concepts"]
-
-    # Retrieve paper_id from original job payload
+    # Fix #4: Read paper_id from ORIGINAL payload BEFORE overwriting it
     paper_id = 0
     try:
         orig_payload = json.loads(job.payload)
         paper_id = orig_payload.get("paper_id", 0)
-    except:
+    except Exception:
         pass
 
+    # Now safely overwrite the payload with approved concepts
+    concepts = [c.model_dump() for c in approved_data.approved_concepts]
+    job.status = "approved"
+    job.payload = json.dumps({"approved_concepts": concepts, "paper_id": paper_id})
+    db.commit()
+
+    # Trigger Phase 2 (Graph Write)
+    from backend.workers.tasks_graph import write_concepts_task
     write_concepts_task.delay(job_id, concepts, paper_id)
 
     return {"status": "approved", "message": "Graph write triggered"}
