@@ -15,7 +15,7 @@ const Layout: React.FC = () => {
         { name: 'Projects', path: '/projects', icon: LayoutGrid },
         { name: 'Ideas', path: '/ideas', icon: Lightbulb },
         { name: 'Research', path: '/research', icon: Network },
-    # { name: 'Tasks', path: '/tasks', icon: ListTodo }, # Phase 6 scope didn't ask for Tasks UI but it's in nav model
+        { name: 'Tasks', path: '/tasks', icon: ListTodo },
     ];
 
     return (
