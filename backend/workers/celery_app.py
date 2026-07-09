@@ -13,5 +13,14 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
-    imports=["backend.workers.health_tasks"]
+    # Fix #13: All task modules must be listed so Celery workers auto-discover tasks.
+    # Previously only health_tasks was included, so ingestion/graph/reasoning/project
+    # tasks were never registered on the workers.
+    imports=[
+        "backend.workers.health_tasks",
+        "backend.workers.tasks_ingestion",
+        "backend.workers.tasks_graph",
+        "backend.workers.tasks_reasoning",
+        "backend.workers.tasks_project",
+    ]
 )
