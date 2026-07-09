@@ -26,8 +26,10 @@ class Idea(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)
     summary = Column(Text)
-    status = Column(String, default="draft")  # draft / mature / rejected
+    status = Column(String, default="draft")  # draft / mature / rejected / promoted
     origin = Column(String)  # research / project
+    # Fix #14: Store the Neo4j element ID to avoid fragile title-based graph lookups
+    neo4j_element_id = Column(String, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

@@ -44,6 +44,7 @@ def update_status(id: int, status: str = Body(..., embed=True), db: Session = De
         
     idea.status = status
     db.commit()
+    db.refresh(idea)
     return idea
 
 @router.post("/{id}/promote")
@@ -56,10 +57,7 @@ def promote_idea(id: int, db: Session = Depends(get_db)):
     if idea.status != "mature":
         raise HTTPException(status_code=400, detail="Idea must be 'mature' to promote")
 
-    # 2. Check Promotion Rules (e.g., checks executed here or manually overridden)
-    # For now, we assume manual trigger = approval
-
-    # 3. Create Project
+    # 2. Create Project
     new_proj = Project(
         name=idea.title,
         domain="Promoted Idea", 
@@ -69,40 +67,48 @@ def promote_idea(id: int, db: Session = Depends(get_db)):
     db.add(new_proj)
     db.commit()
     db.refresh(new_proj)
-    
-    # 4. Link Idea -> Project (BELONGS_TO_PROJECT) - already handled if created in project context, 
-    # but this is promotion to NEW project.
-    
+
     driver = neo4j_client.driver
-    if not driver: neo4j_client.connect()
+    if not driver:
+        neo4j_client.connect()
+        driver = neo4j_client.driver
+
     with driver.session() as session:
-        # Create Project Node
-        session.run(f"MERGE (p:{Label.Project} {{project_id: $pid, name: $name}})", 
-                    pid=new_proj.id, name=new_proj.name)
-        
-        # Link Idea (which lives in Neo4j) to this new Project
-        # We need to find the Neo4j node for this SQL Idea. Ideally we stored elementId in SQL or 
-        # use title matching (risky). Phase 5 spec says "No duplication", so we link.
-        # We'll match by title for this demo (since we didn't store Neo4j ID in SQLite Idea table yet)
-        
-        q_link = f"""
-        MATCH (i:{Label.Idea} {{title: $title}})
-        MATCH (p:{Label.Project} {{project_id: $pid}})
-        MERGE (i)-[:{Relation.BELONGS_TO_PROJECT} {{source: "promotion"}}]->(p)
-        """
-        session.run(q_link, title=idea.title, pid=new_proj.id)
+        # Create Project Node in Neo4j
+        session.run(
+            f"MERGE (p:{Label.Project} {{project_id: $pid, name: $name}})",
+            pid=new_proj.id, name=new_proj.name
+        )
 
-        # 5. Initialize Project KG based on lineage?
-        # Typically we want to import the SOURCE concepts of the idea into the project too.
-        # "Initialize project KG using idea lineage"
-        q_import_lineage = f"""
-        MATCH (i:{Label.Idea} {{title: $title}})-[:{Relation.DERIVED_FROM}]->(c:{Label.Concept})
-        MATCH (p:{Label.Project} {{project_id: $pid}})
-        MERGE (c)-[:{Relation.BELONGS_TO_PROJECT} {{source: "idea_lineage"}}]->(p)
-        """
-        session.run(q_import_lineage, title=idea.title, pid=new_proj.id)
+        # Fix #14: Use neo4j_element_id stored at synthesis time for reliable linking.
+        # Falls back to title match only if element_id wasn't captured (legacy data).
+        if idea.neo4j_element_id:
+            q_link = f"""
+            MATCH (i:{Label.Idea})
+            WHERE elementId(i) = $eid
+            MATCH (p:{Label.Project} {{project_id: $pid}})
+            MERGE (i)-[:{Relation.BELONGS_TO_PROJECT} {{source: "promotion"}}]->(p)
+            """
+            session.run(q_link, eid=idea.neo4j_element_id, pid=new_proj.id)
 
-    # 6. Update Idea Status
+            q_import_lineage = f"""
+            MATCH (i:{Label.Idea})
+            WHERE elementId(i) = $eid
+            MATCH (i)-[:{Relation.DERIVED_FROM}]->(c:{Label.Concept})
+            MATCH (p:{Label.Project} {{project_id: $pid}})
+            MERGE (c)-[:{Relation.BELONGS_TO_PROJECT} {{source: "idea_lineage"}}]->(p)
+            """
+            session.run(q_import_lineage, eid=idea.neo4j_element_id, pid=new_proj.id)
+        else:
+            # Legacy fallback: title-based (still risky but only for old ideas)
+            q_link = f"""
+            MATCH (i:{Label.Idea} {{title: $title}})
+            MATCH (p:{Label.Project} {{project_id: $pid}})
+            MERGE (i)-[:{Relation.BELONGS_TO_PROJECT} {{source: "promotion"}}]->(p)
+            """
+            session.run(q_link, title=idea.title, pid=new_proj.id)
+
+    # 3. Update Idea Status
     idea.status = "promoted"
     db.commit()
 
