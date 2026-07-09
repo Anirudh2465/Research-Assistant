@@ -5,7 +5,7 @@ from backend.services.vector_service import vector_service
 from backend.services.graph_service import graph_service
 from backend.services.llm_extraction import llm_extractor
 from backend.db.sqlite import SessionLocal
-from backend.db.models import CeleryJob, Project
+from backend.db.models import CeleryJob, Project, Task
 from backend.db.neo4j import neo4j_client
 from backend.db.graph_schema import Label, Relation
 import json
@@ -22,7 +22,7 @@ def initialize_project_kg_task(project_id: int):
     ps = project.problem_statement
     session.close()
 
-    # 2. Parse PS via LLM
+    # 2. Parse PS via LLM (Fix #10: actually use the returned keywords)
     keywords = extract_keywords(ps)
     
     # 3. Retrieve Global Concepts
@@ -33,31 +33,22 @@ def initialize_project_kg_task(project_id: int):
     if all_concepts:
         # Build temp index
         index, concept_list = vector_service.create_batch_index(all_concepts)
-        # Search for keywords
-        # Combine keywords into a query phrase or search individually
-        query = ps # Use full PS as query for semantic match
+        # Use keywords joined + full PS as query for semantic match
+        query = f"{' '.join(keywords)} {ps}" if keywords else ps
         results = vector_service.search_local_index(query, index, concept_list, k=20)
         
         candidates = [r["concept"] for r in results]
 
     # 5. Store Candidates for Review
-    # We use a special CeleryJob type or just update the project status if we had one.
-    # Phase 2 used CeleryJob for everything. Let's create a job record or assume one existed.
-    # The API probably created a job. We need that job_id. 
-    # For simplicity, we'll assume the API created a job and we update it if passed, 
-    # but here we just return the candidates. In a real system we'd write to a 'pending_imports' table.
-    
-    # We will write to a dedicated job for "Project Init" if tracked, 
-    # or just return. BUT Phase 4 spec says: "Candidate concept list... Human Relevance Gate".
-    # We need to persist this result. Let's update the Project payload (if we added one) or a Job.
-    # Let's assume the API created a job and passed job_id. We'll update function sig.
     return {"candidates": candidates, "project_id": project_id}
 
 @celery_app.task(name="project.import_concepts")
 def import_concepts_task(project_id: int, concept_names: list):
     driver = neo4j_client.driver
-    if not driver: neo4j_client.connect()
-    
+    if not driver:
+        neo4j_client.connect()
+        driver = neo4j_client.driver
+
     with driver.session() as session:
         query = f"""
         MATCH (c:{Label.Concept})
@@ -71,32 +62,65 @@ def import_concepts_task(project_id: int, concept_names: list):
 
 @celery_app.task(name="project.calculate_progress")
 def calculate_progress_task(project_id: int):
-    # Naive mockup of progress dimensions
-    # Real impl would count nodes/papers linked
-    
-    progress = {
-        "literature": 0.1,
-        "method": 0.0,
-        "evaluation": 0.0,
-        "novelty": 0.5
-    }
-    
-    # Fetch subgraph to count
+    """
+    Fix #11: Calculate progress from actual data instead of hardcoded values.
+    Dimensions:
+      - literature : fraction of concept nodes linked (goal=20)
+      - method     : fraction of Method nodes linked (goal=5)
+      - evaluation : fraction of tasks marked done (goal based on total tasks)
+      - novelty    : fraction of Idea nodes with novelty >= 0.7 (goal=2)
+    """
     subgraph = graph_service.get_project_subgraph(project_id)
     nodes = subgraph.get("nodes", [])
-    
-    if nodes:
-        progress["literature"] = min(len(nodes) / 20.0, 1.0) # Arbitrary goal of 20 concepts
-    
+
+    # Count node types
+    concept_count = sum(1 for n in nodes if "Concept" in n.get("labels", []))
+    method_count  = sum(1 for n in nodes if "Method" in n.get("labels", []))
+    idea_count    = sum(1 for n in nodes if "Idea"   in n.get("labels", []))
+    novel_ideas   = sum(
+        1 for n in nodes
+        if "Idea" in n.get("labels", []) and n.get("properties", {}).get("novelty", 0) >= 0.7
+    )
+
+    # Task completion from SQLite
+    db = SessionLocal()
+    try:
+        total_tasks = db.query(Task).filter(Task.linked_project_id == project_id).count()
+        done_tasks  = db.query(Task).filter(
+            Task.linked_project_id == project_id,
+            Task.status == "done"
+        ).count()
+    finally:
+        db.close()
+
+    progress = {
+        "literature": min(concept_count / 20.0, 1.0),
+        "method":     min(method_count / 5.0, 1.0),
+        "evaluation": (done_tasks / total_tasks) if total_tasks > 0 else 0.0,
+        "novelty":    min(novel_ideas / 2.0, 1.0),
+    }
+
     return progress
 
-def extract_keywords(text):
-    # Simple LLM call wrapper
-    prompt = f"Extract core research keywords from: {text}. Return JSON list."
+def extract_keywords(text: str) -> list:
+    """
+    Fix #10: Actually parse the LLM JSON response instead of returning hardcoded mock.
+    """
+    prompt = (
+        f"Extract the core research keywords from the following problem statement. "
+        f"Return a JSON array of strings only, no other text.\n\nProblem: {text}"
+    )
     messages = [{"role": "user", "content": prompt}]
     try:
         res = llm_extractor._call_llm(messages)
-        # Parse JSON... skipping for brevity, assume simple string list or mock
-        return ["keyword1", "keyword2"] 
-    except:
+        # Find JSON array in response
+        start = res.find("[")
+        end   = res.rfind("]") + 1
+        if start != -1 and end != 0:
+            keywords = json.loads(res[start:end])
+            if isinstance(keywords, list):
+                return [str(k) for k in keywords]
+        return []
+    except Exception as e:
+        logger.warning(f"extract_keywords failed: {e}")
         return []
