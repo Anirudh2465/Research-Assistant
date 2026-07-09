@@ -1,20 +1,34 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import redis
+
 from backend.core.config import settings
 from backend.core.logging import logger
 from backend.db.neo4j import neo4j_client
+from backend.db.sqlite import init_db  # Fix #17: called here, not on import
 from backend.workers.celery_app import celery_app
 from backend.workers.health_tasks import check_health
 from backend.api import papers, research, projects, ideas, tasks
 
-import redis
 
-from fastapi.middleware.cors import CORSMiddleware
+# Fix #18: Replace deprecated @app.on_event with the modern lifespan context manager
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Startup ---
+    logger.info("Starting Research OS API...")
+    init_db()  # Fix #17: explicit init instead of side-effect on import
+    yield
+    # --- Shutdown ---
+    logger.info("Shutting down Research OS API...")
+    neo4j_client.close()
 
-app = FastAPI(title="Research OS API")
+
+app = FastAPI(title="Research OS API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"], # Vite default
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # Vite default
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,16 +40,6 @@ app.include_router(projects.router)
 app.include_router(ideas.router)
 app.include_router(tasks.router)
 
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Starting Research OS API...")
-    # Neo4j connection is lazy, but we can init here if we want.
-    # We'll rely on the health check to verify connections.
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Shutting down Research OS API...")
-    neo4j_client.close()
 
 @app.get("/health")
 def health_check():
@@ -65,20 +69,15 @@ def health_check():
 
     # Check Celery Worker (submission)
     try:
-        # We just check if we can send a task. 
-        # For a true "ready" check we might need to inspect queues, 
-        # but sending a task confirms broker connectivity + app config.
-        # Ideally we'd use celery_app.control.ping() but that requires workers to be online.
-        # User asked for "celery: ready".
-        # We'll trigger the async task.
         task = check_health.delay()
-        health_status["celery"] = "ready" # Task dispatched
+        health_status["celery"] = "ready"  # Task dispatched
     except Exception as e:
         logger.error(f"Celery check failed: {e}")
         health_status["status"] = "degraded"
         health_status["celery"] = "error"
 
     return health_status
+
 
 if __name__ == "__main__":
     import uvicorn

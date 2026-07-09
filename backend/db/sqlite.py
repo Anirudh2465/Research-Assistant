@@ -42,5 +42,5 @@ def check_sqlite_connection():
         logger.error(f"SQLite connection failed: {e}")
         return False
 
-# Auto-initialize on import (or better, call explicitly in main.py)
-init_db()
+# Fix #17: Removed auto-init on import.
+# init_db() is now called explicitly in backend/main.py's lifespan startup handler.
